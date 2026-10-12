@@ -1,0 +1,24 @@
+{
+  "name": "@phone-rep/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo 'no worker tests' && exit 0",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@phone-rep/api": "workspace:*",
+    "@phone-rep/shared": "workspace:*",
+    "drizzle-orm": "^0.36.1",
+    "pg-boss": "^9.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
