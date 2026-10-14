@@ -45,9 +45,47 @@ pnpm dev:worker
 pnpm dev:web                    # http://localhost:3000 (proxies /api/* to the API)
 ```
 
-`pnpm smoke` runs an end-to-end curl script against a running API + worker (sign-in, lookup,
-report, idempotent replay, withdraw, dispute → epoch bump, data source → import preview →
-commit → rollback).
+### Full build and live smoke tests
+
+The website now uses Next.js 16.4.0. React 18 remains supported for this release but
+Next.js warns that it will require React 19 in the next major version.
+
+```bash
+pnpm install --frozen-lockfile
+API_INTERNAL_URL=http://127.0.0.1:4000 pnpm build
+pnpm typecheck
+pnpm lint
+
+# Stop your local dev servers first; ports 3000 and 4000 must be free.
+# This must be a disposable LOCAL PostgreSQL server with CREATEDB permission.
+# Do not use a production server or production credentials.
+SMOKE_DATABASE_URL=postgres://localhost/postgres \
+CHROMIUM_EXECUTABLE="$(command -v chromium)" pnpm smoke
+```
+
+Install Chromium locally, or install a matching Playwright browser with
+`pnpm --filter @phone-rep/web exec playwright-core install chromium` and omit
+`CHROMIUM_EXECUTABLE`. Only container/root runners that require it should set
+`SMOKE_CHROMIUM_NO_SANDBOX=1`; sandboxing is enabled by default.
+
+The smoke runner creates a randomly named `phone_rep_smoke_*` database, applies actual
+migrations, seeds synthetic data, and launches the compiled API, real pg-boss worker,
+and production-built website. It generates temporary encryption/session keys, uses only
+the console mailer and local staging storage, and never truncates the database in the
+connection URL. It refuses occupied ports and builds configured to proxy to a remote API.
+Afterward it stops only its own processes, drops its own database, and deletes staging
+objects. An abrupt OS kill may require manual cleanup of that run's test database.
+
+Checks cover authentication, consent, reporting, idempotency, moderation, lookup,
+withdrawal, disputes/reassignment, CSV validation/deduplication/import/rollback,
+real worker processing, browser forms, admin restrictions, and mobile layout.
+Results, private logs and screenshots are written to a temporary directory printed by
+the runner. These contain synthetic test data and development magic links; do not publish
+the logs. Real SMTP delivery, S3/MinIO, load testing and production deployment are not tested.
+
+Next.js 16 removed `next lint`; `pnpm lint` now runs standalone ESLint. Existing
+React 18 data-fetching effects emit seven `set-state-in-effect` warnings; these are
+kept visible rather than expanding this dependency upgrade into a UI/state rewrite.
 
 Sign in with magic links: the link is printed to the API console (`MAILER=console`).
 This mode is development-only. Production requires `MAILER=smtp`, the `SMTP_*` secrets
@@ -62,7 +100,8 @@ authenticated API request, including existing sessions. Removing an email revoke
 privilege after configuration is reloaded/restarted on all API instances. Sign-in also
 synchronizes the stored role downward. Restart every instance when changing allowlists.
 
-Seeded lookups (after `pnpm db:seed`): `+919000000001` (strong fraud signal),
+Seeded lookups (after `pnpm db:seed`): `+919000000001` (elevated/strong fraud signal,
+depending on scoring and decay),
 `+919000000002` (some suspicious reports), `+919000000003` (spam only).
 
 ## Tests
