@@ -6,4 +6,5 @@ export { createBoss, enqueueRecompute, txDb, QUEUES, type RecomputeJob, type Imp
 export { createS3Storage, createMemoryStorage, createFsStorage, createStorageFromEnv } from "./storage/s3.js";
 export type { StorageProvider } from "./storage/provider.js";
 export { recomputeReputation, stalePhoneIds } from "./services/recompute.js";
+export { expireStagingFiles } from "./services/staging-expiry.js";
 export { runImportParse, runImportCommit, runImportRollback, type ImportDeps } from "./services/imports.js";

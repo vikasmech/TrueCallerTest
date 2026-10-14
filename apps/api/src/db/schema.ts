@@ -149,6 +149,8 @@ export const reports = pgTable(
     status: reportStatusEnum("status").notNull(),
     withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
     screeningReason: text("screening_reason"),
+    // One current human-reviewed outcome per report; repeated decisions cannot inflate trust.
+    reviewedOutcome: text("reviewed_outcome").$type<"valid" | "invalid">(),
     coordinationHold: boolean("coordination_hold").notNull().default(false),
     reputationEpoch: integer("reputation_epoch").notNull(),
   },

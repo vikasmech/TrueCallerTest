@@ -20,17 +20,29 @@ import { disputeRoutes } from "./routes/disputes.js";
 import { adminModerationRoutes } from "./routes/admin-moderation.js";
 import { adminSourceRoutes } from "./routes/admin-sources.js";
 import { adminImportRoutes } from "./routes/admin-imports.js";
+import { roleForEmail } from "./auth/roles.js";
 
 export async function buildApp(ctx: AppContext): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
       level: ctx.env.NODE_ENV === "production" ? "info" : "debug",
+      // Magic-link URLs contain bearer tokens. Keep query strings out of access logs.
+      serializers: {
+        req: (req) => ({
+          method: req.method,
+          url: req.url?.split("?")[0],
+          remoteAddress: req.ip,
+        }),
+      },
       redact: {
         paths: [
           "req.headers.cookie",
           "req.headers.authorization",
           "req.body.phoneNumber",
           "req.body.email",
+          "req.query.token",
+          "req.headers.referer",
+          "res.headers.set-cookie",
         ],
         censor: "[redacted]",
       },
@@ -81,7 +93,7 @@ export async function buildApp(ctx: AppContext): Promise<FastifyInstance> {
     req.user = {
       id: u.id,
       email: u.email,
-      role: u.role,
+      role: roleForEmail(u.email, ctx.env),
       verifiedContact: u.verifiedContact,
       restricted: u.restrictedAt !== null,
     };

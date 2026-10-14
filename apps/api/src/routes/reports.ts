@@ -13,7 +13,7 @@ import type { AppContext } from "../context.js";
 import { withTransaction } from "../db/client.js";
 import { phoneNumbers, reports } from "../db/schema.js";
 import { badRequest, forbidden, notFound } from "../errors.js";
-import { requireUnrestricted, requireUser } from "../auth/guards.js";
+import { requireCurrentConsent, requireUnrestricted, requireUser } from "../auth/guards.js";
 import { findOrCreatePhone } from "../repos/phones.js";
 import { enqueueRecompute, txDb } from "../queue.js";
 import { screenReport } from "../services/screening.js";
@@ -22,7 +22,7 @@ export const reportRoutes: (ctx: AppContext) => FastifyPluginAsyncZod = (ctx) =>
   app.post(
     "/v1/reports",
     {
-      preHandler: [requireUser, requireUnrestricted],
+      preHandler: [requireUser, requireUnrestricted, requireCurrentConsent(ctx)],
       config: { rateLimit: { max: 30, timeWindow: "1 hour" } },
       schema: { body: CreateReportRequest, response: { 201: CreateReportResponse, 200: CreateReportResponse } },
     },

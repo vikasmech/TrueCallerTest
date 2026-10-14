@@ -1,4 +1,4 @@
-import { and, eq, isNull, lte } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import {
   QUEUES,
   createBoss,
@@ -7,6 +7,7 @@ import {
   createPool,
   createStorageFromEnv,
   enqueueRecompute,
+  expireStagingFiles,
   loadEnv,
   recomputeReputation,
   runImportCommit,
@@ -81,17 +82,8 @@ await boss.work<ImportBatchJob>(QUEUES.importRollback, async (job) => {
 });
 
 await boss.work(QUEUES.stagingExpiry, async () => {
-  const now = new Date();
-  const expired = await db
-    .select({ id: tables.importBatches.id, objectKey: tables.importBatches.objectKey })
-    .from(tables.importBatches)
-    .where(and(lte(tables.importBatches.stagingExpiresAt, now), isNull(tables.importBatches.stagingDeletedAt)))
-    .limit(100);
-  for (const b of expired) {
-    await storage.deleteObject(b.objectKey).catch((e) => log("staging delete failed", { id: b.id, err: String(e) }));
-    await db.update(tables.importBatches).set({ stagingDeletedAt: now }).where(eq(tables.importBatches.id, b.id));
-  }
-  log("staging expiry", { deleted: expired.length });
+  const result = await expireStagingFiles(db, storage, (id) => log("staging delete failed", { id }));
+  log("staging expiry", result);
 });
 
 await boss.schedule(QUEUES.refreshStale, "15 3 * * *", undefined, { tz: "Asia/Kolkata" });

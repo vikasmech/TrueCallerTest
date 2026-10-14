@@ -18,7 +18,7 @@ preview, approval, deduplication and rollback. Evidence uploads (step 2) are not
 
 ## Prerequisites
 
-- Node 18.18+ and pnpm 9 (`npm i -g pnpm`)
+- Node 22.12+ (22 LTS or 24 LTS) and pnpm 9 (`npm i -g pnpm`)
 - Either Docker with Compose (Postgres + MinIO), or no Docker: use `pnpm dev:db` (embedded
   Postgres on port 5433) and leave `S3_ENDPOINT` empty so import staging uses a local directory.
 
@@ -50,7 +50,17 @@ report, idempotent replay, withdraw, dispute → epoch bump, data source → imp
 commit → rollback).
 
 Sign in with magic links: the link is printed to the API console (`MAILER=console`).
-Emails listed in `ADMIN_EMAILS` / `MODERATOR_EMAILS` receive that role on sign-in.
+This mode is development-only. Production requires `MAILER=smtp`, the `SMTP_*` secrets
+in `.env.example`, and an HTTPS `WEB_BASE_URL`. SMTP requires TLS (implicit TLS with
+`SMTP_SECURE=true`, or STARTTLS otherwise); it never logs sign-in links. API access logs
+omit URL query strings, and the verification page/API disable referrers and caching.
+Set reverse-proxy/CDN access logs to omit query strings for `/auth/verify` and
+`/api/v1/auth/verify` too; application logging cannot control infrastructure logs.
+
+`ADMIN_EMAILS` / `MODERATOR_EMAILS` are authoritative allowlists checked on every
+authenticated API request, including existing sessions. Removing an email revokes its
+privilege after configuration is reloaded/restarted on all API instances. Sign-in also
+synchronizes the stored role downward. Restart every instance when changing allowlists.
 
 Seeded lookups (after `pnpm db:seed`): `+919000000001` (strong fraud signal),
 `+919000000002` (some suspicious reports), `+919000000003` (spam only).
@@ -61,6 +71,18 @@ Seeded lookups (after `pnpm db:seed`): `+919000000001` (strong fraud signal),
 pnpm test        # vitest: scoring, normalization, crypto, CSV import parsing
 pnpm typecheck
 ```
+
+The database-backed security regressions require a **disposable local PostgreSQL**
+account with `CREATEDB` permission:
+
+```
+TEST_DATABASE_URL=postgres://localhost/postgres pnpm --filter @phone-rep/api test
+```
+
+The suite creates and drops its own randomly named `phone_rep_test_*` database. It
+does not truncate the database supplied in the URL. Without this variable, those
+integration tests are explicitly skipped. SMTP delivery tests use a mock transport;
+verify actual delivery with your provider before opening the pilot.
 
 ## Key behaviours
 
@@ -74,6 +96,30 @@ pnpm typecheck
   rollback that preserves observations still linked to another active batch, formula-escaped
   error CSV.
 - External source signals are shown separately and contribute nothing to the community score.
+- Current-notice consent is enforced server-side before accepting reports; withdrawal and
+  disputes remain available without renewed reporting consent.
+- Human review stores one current outcome per report. Replayed/concurrent reviews do not
+  inflate trust; holds remove that report's reviewed credit, and corrected decisions replace
+  prior credit/penalties. Withdrawal preserves the historical human-review outcome.
+- Trust changes enqueue recalculation for every number reported by the affected reporter.
+- Failed staging-file deletions are not marked complete and remain eligible for retry.
+
+## Applying the hardening migration
+
+Back up the database and run `pnpm db:migrate` before starting the updated API/worker.
+Migration `0001` adds `reports.reviewed_outcome`, reconstructs reviewed counts from report
+rows/audit records, and clears previously computed public labels to `insufficient_reports`.
+Legacy withdrawn reports are conservatively left without reviewed credit because their
+previous state cannot be recovered reliably from the old schema.
+The existing daily worker refresh rebuilds these summaries; keep the pilot private until
+the affected summaries have been recomputed. Audit entries are retained.
+
+This remains a private pilot, not a production-readiness or security certification.
+No government/Truecaller feed or caller-name dataset is included. Production still needs
+provider delivery verification, deployment/proxy configuration, dependency review,
+backups/monitoring, data-retention and privacy procedures, and an owner-selected license.
+The staging cleanup fix retries object deletion; it does **not** implement a general
+retention policy for normalized import rows, reports, or authentication records.
 
 ## Environment
 

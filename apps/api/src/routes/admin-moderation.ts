@@ -5,7 +5,6 @@ import {
   AdminReportRow,
   DisputeDecisionRequest,
   DisputeSummary,
-  POLICY_VERSION,
   ReportDecisionRequest,
   ReportStatus,
   maskE164,
@@ -23,8 +22,7 @@ import { badRequest, conflict, notFound } from "../errors.js";
 import { requireModerator } from "../auth/guards.js";
 import { enqueueRecompute, txDb } from "../queue.js";
 import { toSummary } from "./disputes.js";
-
-const REVIEWED_VALID_FOR_PROMOTION = 5;
+import { refreshReporterQuality } from "../services/reporter-quality.js";
 
 export const adminModerationRoutes: (ctx: AppContext) => FastifyPluginAsyncZod =
   (ctx) => async (app) => {
@@ -69,28 +67,24 @@ export const adminModerationRoutes: (ctx: AppContext) => FastifyPluginAsyncZod =
         schema: { params: z.object({ id: z.string().uuid() }), body: ReportDecisionRequest },
       },
       async (req, reply) => {
-        const [r] = await ctx.db.select().from(reports).where(eq(reports.id, req.params.id)).limit(1);
-        if (!r) throw notFound("Report");
-        if (r.status === "withdrawn") throw conflict("WITHDRAWN", "Withdrawn reports cannot be moderated.");
         const { decision, reasonCode, newCategory, note } = req.body;
         if (decision === "recategorize" && !newCategory) {
           throw badRequest("MISSING_CATEGORY", "newCategory is required to recategorize.");
         }
 
         await withTransaction(ctx.pool, async (tx, client) => {
+          const [r] = await tx.select().from(reports).where(eq(reports.id, req.params.id)).for("update");
+          if (!r) throw notFound("Report");
+          if (r.status === "withdrawn") throw conflict("WITHDRAWN", "Withdrawn reports cannot be moderated.");
           const patch: Partial<typeof reports.$inferInsert> = {};
-          if (decision === "accept") Object.assign(patch, { status: "accepted", coordinationHold: false });
-          if (decision === "reject") Object.assign(patch, { status: "rejected" });
-          if (decision === "hold") Object.assign(patch, { status: "in_review", coordinationHold: reasonCode === "suspected_coordination" });
-          if (decision === "recategorize") Object.assign(patch, { category: newCategory, status: "accepted", coordinationHold: false });
+          if (decision === "accept") Object.assign(patch, { status: "accepted", coordinationHold: false, reviewedOutcome: "valid" });
+          if (decision === "reject") Object.assign(patch, { status: "rejected", reviewedOutcome: reasonCode === "demonstrably_false" ? "invalid" : null });
+          if (decision === "hold") Object.assign(patch, { status: "in_review", coordinationHold: reasonCode === "suspected_coordination", reviewedOutcome: null });
+          if (decision === "recategorize") Object.assign(patch, { category: newCategory, status: "accepted", coordinationHold: false, reviewedOutcome: "valid" });
           patch.screeningReason = reasonCode;
           await tx.update(reports).set(patch).where(eq(reports.id, r.id));
 
-          if (decision === "accept" || decision === "recategorize") {
-            await bumpQuality(tx, r.reporterId, "valid");
-          } else if (decision === "reject" && reasonCode === "demonstrably_false") {
-            await bumpQuality(tx, r.reporterId, "invalid");
-          }
+          await refreshReporterQuality(tx, r.reporterId, ctx.boss, client);
 
           await tx.insert(moderationActions).values({
             actorId: req.user!.id,
@@ -134,12 +128,12 @@ export const adminModerationRoutes: (ctx: AppContext) => FastifyPluginAsyncZod =
         schema: { params: z.object({ id: z.string().uuid() }), body: DisputeDecisionRequest },
       },
       async (req, reply) => {
-        const [d] = await ctx.db.select().from(disputes).where(eq(disputes.id, req.params.id)).limit(1);
-        if (!d) throw notFound("Dispute");
-        if (d.status === "resolved") throw conflict("RESOLVED", "Dispute already resolved.");
         const { decision, note, invalidateReportIds } = req.body;
 
         await withTransaction(ctx.pool, async (tx, client) => {
+          const [d] = await tx.select().from(disputes).where(eq(disputes.id, req.params.id)).for("update");
+          if (!d) throw notFound("Dispute");
+          if (d.status === "resolved") throw conflict("RESOLVED", "Dispute already resolved.");
           const now = new Date();
           await tx
             .update(disputes)
@@ -147,10 +141,14 @@ export const adminModerationRoutes: (ctx: AppContext) => FastifyPluginAsyncZod =
             .where(eq(disputes.id, d.id));
 
           if (decision === "uphold_correction" && invalidateReportIds?.length) {
-            await tx
+            const corrected = await tx
               .update(reports)
-              .set({ status: "rejected", screeningReason: "demonstrably_false" })
-              .where(and(eq(reports.phoneId, d.phoneId), inArray(reports.id, invalidateReportIds)));
+              .set({ status: "rejected", screeningReason: "demonstrably_false", reviewedOutcome: "invalid" })
+              .where(and(eq(reports.phoneId, d.phoneId), inArray(reports.id, invalidateReportIds)))
+              .returning({ reporterId: reports.reporterId });
+            for (const reporterId of [...new Set(corrected.map((r) => r.reporterId))].sort()) {
+              await refreshReporterQuality(tx, reporterId, ctx.boss, client);
+            }
           }
           if (decision === "uphold_reassignment") {
             // New epoch: prior reports and observations stop contributing without being deleted.
@@ -174,29 +172,3 @@ export const adminModerationRoutes: (ctx: AppContext) => FastifyPluginAsyncZod =
       },
     );
   };
-
-async function bumpQuality(
-  tx: Parameters<Parameters<typeof withTransaction>[1]>[0],
-  reporterId: string,
-  kind: "valid" | "invalid",
-) {
-  const inc = kind === "valid" ? { reviewedValidCount: sql`${reporterQuality.reviewedValidCount} + 1` } : { reviewedInvalidCount: sql`${reporterQuality.reviewedInvalidCount} + 1` };
-  const [q] = await tx
-    .insert(reporterQuality)
-    .values({ reporterId, policyVersion: POLICY_VERSION, ...(kind === "valid" ? { reviewedValidCount: 1 } : { reviewedInvalidCount: 1 }) })
-    .onConflictDoUpdate({ target: reporterQuality.reporterId, set: { ...inc, updatedAt: new Date() } })
-    .returning();
-  if (!q) return;
-  // Promotion requires reviewed outcomes; any reviewed-invalid report demotes to new_verified.
-  const tier =
-    q.reviewedInvalidCount > 0
-      ? "new_verified"
-      : q.reviewedValidCount >= REVIEWED_VALID_FOR_PROMOTION
-        ? "reviewed_valid_history"
-        : q.reviewedValidCount >= 1
-          ? "established"
-          : "new_verified";
-  if (tier !== q.qualityTier) {
-    await tx.update(reporterQuality).set({ qualityTier: tier }).where(eq(reporterQuality.reporterId, reporterId));
-  }
-}

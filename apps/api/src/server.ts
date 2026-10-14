@@ -24,7 +24,7 @@ const ctx: AppContext = {
     encKeyHex: env.PHONE_ENC_KEY,
     keyVersion: env.PHONE_KEY_VERSION,
   }),
-  mailer: createMailer(env.MAILER, (m) => console.log(m)),
+  mailer: createMailer(env, (m) => console.log(m)),
   storage: createStorageFromEnv(env),
 };
 

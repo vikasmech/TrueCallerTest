@@ -7,6 +7,7 @@ import { randomToken, sha256Hex } from "../crypto.js";
 import { consentEvents, magicLinkTokens, reporterQuality, users } from "../db/schema.js";
 import { badRequest, unauthorized } from "../errors.js";
 import { requireUser } from "../auth/guards.js";
+import { roleForEmail } from "../auth/roles.js";
 
 const MAGIC_LINK_TTL_MS = 15 * 60 * 1000;
 
@@ -37,7 +38,8 @@ export const authRoutes: (ctx: AppContext) => FastifyPluginAsyncZod = (ctx) => a
       config: { rateLimit: { max: 20, timeWindow: "15 minutes" } },
       schema: { querystring: MagicLinkVerifyQuery, response: { 200: MeResponse } },
     },
-    async (req) => {
+    async (req, reply) => {
+      reply.header("Cache-Control", "no-store").header("Referrer-Policy", "no-referrer");
       const hash = sha256Hex(req.query.token);
       const now = new Date();
       const [row] = await ctx.db
@@ -53,19 +55,15 @@ export const authRoutes: (ctx: AppContext) => FastifyPluginAsyncZod = (ctx) => a
         .returning();
       if (!row) throw badRequest("INVALID_TOKEN", "This sign-in link is invalid or has expired.");
 
-      const role = ctx.env.ADMIN_EMAILS.includes(row.email)
-        ? "admin"
-        : ctx.env.MODERATOR_EMAILS.includes(row.email)
-          ? "moderator"
-          : "user";
+      const role = roleForEmail(row.email, ctx.env);
 
       const [user] = await ctx.db
         .insert(users)
         .values({ email: row.email, role, verifiedContact: true })
         .onConflictDoUpdate({
           target: users.email,
-          // Email ownership is re-verified on every magic link; role allowlist can promote.
-          set: { verifiedContact: true, ...(role !== "user" ? { role } : {}) },
+          // Synchronize promotions AND demotions on every sign-in.
+          set: { verifiedContact: true, role },
         })
         .returning();
       if (!user) throw new Error("user upsert failed");
@@ -119,7 +117,7 @@ async function toMe(ctx: AppContext, user: typeof users.$inferSelect): Promise<M
   return {
     id: user.id,
     email: user.email,
-    role: user.role,
+    role: roleForEmail(user.email, ctx.env),
     verifiedContact: user.verifiedContact,
     consentedNoticeVersion: consent?.v ?? null,
     restricted: user.restrictedAt !== null,
